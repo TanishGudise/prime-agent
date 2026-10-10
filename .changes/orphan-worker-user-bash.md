@@ -1,0 +1,1 @@
+- A worker left without its background service now waits for a running `!` command to finish before it exits, instead of exiting underneath it and losing the command's result, like the TypeScript version.
