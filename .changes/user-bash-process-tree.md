@@ -1,0 +1,1 @@
+- Pressing Esc on a running `!` command, or a graceful stop of its session, now also stops the processes the command started, and a command that backgrounds a process (`cmd &`) finishes when its shell exits instead of blocking later `!` commands until that process ends, like the TypeScript version.
