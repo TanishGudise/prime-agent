@@ -1,0 +1,1 @@
+- Non-ASCII output of a `!` command (for example `€`, CJK text or emoji) no longer turns into `�` where a character straddles an 8 KiB pipe read, in the live output, the stored result and the full-output file.

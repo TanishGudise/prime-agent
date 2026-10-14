@@ -632,11 +632,35 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         let stream = Arc::clone(&stream);
         async move {
             let mut buffer = [0u8; 8192];
+            // A read can end inside a multi-byte character: its leading bytes wait here for
+            // the rest, so no character is decoded in halves (TS `TextDecoder`, `stream: true`).
+            let mut pending: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => stream.lock().unwrap().push(&buffer[..read]),
+                    Ok(read) => {
+                        pending.extend_from_slice(&buffer[..read]);
+                        // Everything up to a character the read cut off (`error_len() == None`);
+                        // invalid bytes before it still decode lossily in `push`.
+                        let mut start = 0;
+                        let complete = loop {
+                            match std::str::from_utf8(&pending[start..]) {
+                                Ok(_) => break pending.len(),
+                                Err(error) => match error.error_len() {
+                                    Some(invalid) => start += error.valid_up_to() + invalid,
+                                    None => break start + error.valid_up_to(),
+                                },
+                            }
+                        };
+                        if complete > 0 {
+                            stream.lock().unwrap().push(&pending[..complete]);
+                            pending.drain(..complete);
+                        }
+                    }
                 }
+            }
+            if !pending.is_empty() {
+                stream.lock().unwrap().push(&pending);
             }
         }
     };
@@ -1027,6 +1051,38 @@ mod tests {
         assert_eq!(
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
+        );
+    }
+
+    /// Multi-byte characters that straddle a pipe read decode intact: a per-read decode replaced
+    /// both halves with U+FFFD in the stream, the spill and the row the model reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn characters_split_across_reads_decode_intact() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        // 7-byte lines, so 8 KiB reads keep landing inside a 3-byte character.
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "yes '\u{20ac}\u{20ac}' | head -c 3000000",
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let data = response.data.expect("data");
+        let output = data["output"].as_str().expect("output");
+        let spill = std::fs::read_to_string(data["fullOutputPath"].as_str().expect("spill path"))
+            .expect("read the spill");
+        assert_eq!(
+            (
+                output.matches('\u{fffd}').count(),
+                spill.matches('\u{fffd}').count()
+            ),
+            (0, 0),
+            "replacement characters in the output and the spill"
         );
     }
 
