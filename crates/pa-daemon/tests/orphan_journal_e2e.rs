@@ -1,7 +1,8 @@
 //! Orphan-process journal e2e: a kernel (or its worker) dying without a
 //! shutdown hook must not leak the `bash()` process groups it journaled
 //! — the worker-side kernel-teardown reap and the supervisor-side worker
-//! death reap each answer one half of that contract.
+//! death reap each answer one half of that contract. The worker journals
+//! a running user `!` command the same way, for the supervisor's reap.
 // 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
@@ -527,4 +528,41 @@ fn a_dead_worker_reaps_its_journaled_bash_groups_from_the_supervisor() {
     // The supervisor's crash monitor owns the only reap: the group dies
     // when it fires, not on any timeout of ours.
     expect_group_dead(session.pgid, "the worker kill");
+}
+
+/// T3: a worker killed outright cannot settle its running user `!`
+/// command; the worker journaled the command's shell, so the supervisor's
+/// worker-death reap ends its process group. No kernel is involved.
+#[test]
+fn a_dead_worker_reaps_its_user_command_from_the_supervisor() {
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = root.path().join("agent");
+    let socket = agent_dir.join("t3.sock");
+    let _daemon = spawn_daemon(&socket, &agent_dir, None);
+    let mut client = Client::connect(&socket);
+    let active_session_id = create_session(&mut client, "c1", root.path(), &agent_dir);
+    // The user shell leads its own process group, so `$$` is the group the reap must end.
+    let pgid_file = root.path().join("user-command.pgid");
+    let started = client.request(
+        "b1",
+        &json!({
+            "type": "execute_bash",
+            "activeSessionId": active_session_id,
+            "command": format!("echo $$ > '{}'; sleep 600; echo after", pgid_file.display()),
+        }),
+    );
+    assert_eq!(started["success"], true, "execute_bash failed: {started}");
+    let pgid = wait_until(Duration::from_secs(30), || {
+        let content = std::fs::read_to_string(&pgid_file).ok()?;
+        content.strip_suffix('\n')?.parse::<i32>().ok()
+    });
+    let _guard = GroupGuard(pgid);
+    assert!(
+        group_alive(pgid),
+        "the user command's group died before the kill: pgid {pgid}"
+    );
+
+    let worker_pid = worker_pid(&agent_dir, &active_session_id);
+    signal_pid(Pid::from_raw(worker_pid), Signal::SIGKILL).expect("kill the worker");
+    expect_group_dead(pgid, "the worker kill");
 }

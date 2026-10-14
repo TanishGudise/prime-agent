@@ -2,6 +2,8 @@
 //! under the kernel pid into the file named by
 //! `PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL`; the host reaps those
 //! groups when a killed/crashed kernel cannot run its own shutdown hook.
+//! The daemon worker journals a running user `!` command's shell the same
+//! way, so a killed worker's command is reaped with them.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -210,9 +212,10 @@ pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
     }
 }
 
-/// Kill the still-active `bash()` process groups a dead worker's kernels
-/// journaled, then clear the journal (TS `recoverUncertainWorkerOperations`'
-/// orphan sweep, owner-scoped to the worker's own pid). The journal is
+/// Kill the still-active process groups a dead worker journaled (its
+/// kernels' `bash()` groups and its running user command), then clear the
+/// journal (TS `recoverUncertainWorkerOperations`' orphan sweep,
+/// owner-scoped to the worker's own pid). The journal is
 /// kept only when a kill failed and every record carried an identity, so
 /// the next recovery pass can safely retry.
 pub fn reap_worker_orphan_processes(path: &Path, worker_pid: i32) {

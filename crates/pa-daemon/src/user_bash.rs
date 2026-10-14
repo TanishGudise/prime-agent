@@ -600,6 +600,12 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         Ok(child) => child,
         Err(error) => return spawn_failure(error.to_string()),
     };
+    // Journaled while it runs: a worker killed outright cannot settle the command, so the
+    // supervisor reaps it with the worker's other orphans (TS `trackDetachedChildPid`).
+    let journaled = child.id().and_then(|pid| i32::try_from(pid).ok());
+    if let Some(pid) = journaled {
+        pa_core::kernel::orphan_journal::record_orphan_process_state(pid, true);
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // Only this run kills its tree, and only before it reaps the child: a
@@ -672,6 +678,9 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         let _ = tokio::time::timeout(EXIT_STDIO_GRACE, &mut pumps).await;
     }
     drop(pumps);
+    if let Some(pid) = journaled {
+        pa_core::kernel::orphan_journal::record_orphan_process_state(pid, false);
+    }
     let exit_code = status.ok().and_then(|status| status.code()).map(i64::from);
     let cancelled = run.cancellation.is_cancelled();
     // The pumps are dropped, so this is the last reference; a poisoned

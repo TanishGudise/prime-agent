@@ -1,0 +1,1 @@
+- A `!` command no longer keeps running after its session's background worker is killed outright: the service stops it when it recovers the worker, like the TypeScript version.
