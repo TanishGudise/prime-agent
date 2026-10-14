@@ -1,0 +1,1 @@
+- ANSI color codes in a `!` command's output no longer leave fragments like `X0m` behind where a sequence straddles an 8 KiB pipe read.

@@ -652,6 +652,22 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
                                 },
                             }
                         };
+                        // An escape sequence the read cut off waits too, so the ANSI strip
+                        // sees it whole (bounded: a stray ESC holds at most 64 bytes back).
+                        let complete = pending[..complete]
+                            .iter()
+                            .rposition(|&byte| byte == 0x1b)
+                            .filter(|&escape| complete - escape <= 64)
+                            .filter(
+                                |&escape| match pending[escape + 1..complete].split_first() {
+                                    None => true,
+                                    Some((b'[', rest)) => {
+                                        !rest.iter().any(|byte| (0x40..=0x7e).contains(byte))
+                                    }
+                                    Some(_) => false,
+                                },
+                            )
+                            .unwrap_or(complete);
                         if complete > 0 {
                             stream.lock().unwrap().push(&pending[..complete]);
                             pending.drain(..complete);
@@ -1051,6 +1067,44 @@ mod tests {
         assert_eq!(
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
+        );
+    }
+
+    /// ANSI escape sequences that straddle a pipe read are stripped whole: a per-read strip left
+    /// fragments like `X0m` in the stream, the spill and the row the model reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn escape_sequences_split_across_reads_strip_whole() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "yes $'\\e[31mX\\e[0m' | head -c 2000000",
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let data = response.data.expect("data");
+        let spill = std::fs::read_to_string(data["fullOutputPath"].as_str().expect("spill path"))
+            .expect("read the spill");
+        // Every whole line strips to `X`; the window's first and the output's cut last line aside.
+        let fragments = |text: &str| {
+            let lines: Vec<&str> = text.lines().collect();
+            lines[1..lines.len() - 1]
+                .iter()
+                .filter(|line| **line != "X")
+                .count()
+        };
+        assert_eq!(
+            (
+                fragments(data["output"].as_str().expect("output")),
+                fragments(&spill)
+            ),
+            (0, 0),
+            "escape-sequence fragments in the output and the spill"
         );
     }
 
